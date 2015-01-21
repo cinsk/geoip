@@ -1,0 +1,214 @@
+#!/usr/bin/env ruby
+
+#require 'pry'
+require 'csv'
+require 'zlib'
+require 'socket'
+require 'fileutils'
+
+geoinfo = []
+
+#binding.pry
+
+PROGRAM_NAME=File.basename($PROGRAM_NAME)
+GEOIP_ENDPOINT="/tmp/geoip"
+PIDFILE="/tmp/geoip.pid"
+
+DEBUG=(ENV["DEBUG"].to_i != 0)
+DAEMONIZE=true
+
+def error(code, msg)
+  $stderr.write("#{PROGRAM_NAME}: #{msg}\n")
+  exit code if code != 0
+end
+
+def debug(msg)
+  $stderr.write("#{PROGRAM_NAME}: debug: #{msg}\n") if DEBUG
+end
+
+class Server
+  def initialize
+    @data = []
+  end
+
+  def prepare
+    fd = Zlib::GzipReader.new(DATA)
+    fd.each_line do |ln|
+      f = CSV.parse_line ln
+      @data << IPRange.new(f[2].to_i, f[3].to_i, f[4], f[5])
+    end
+  end
+  
+  def get_range(ipval)
+    from = 0
+    to = @data.length - 1
+
+    while from <= to
+      mid = (from + to) / 2
+      if ipval < @data[mid].from
+        to = mid - 1
+      elsif ipval <= @data[mid].to
+        return @data[mid]
+      else
+        from = mid + 1
+      end
+    end
+    raise RuntimeError.new("not found")
+  end
+
+  def self.stop
+    open(PIDFILE, "r") { |fd|
+      ln = fd.readline
+      Process.kill("TERM", ln.to_i)
+    }
+  rescue SystemCallError
+    error(0, "sometime went wrong, you'll need to clean manually")
+    error(1, "by removing #{PIDFILE} and #{GEOIP_ENDPOINT}")
+  end
+
+  def self.clean
+    FileUtils::rm_f GEOIP_ENDPOINT
+    # TODO: better to delete PIDFILE when PIDFILE's content is the
+    # same as the current pid?
+    FileUtils::rm_f PIDFILE
+  end
+  
+  def start
+    prepare if @data.length == 0
+    
+    FileUtils::rm_f GEOIP_ENDPOINT
+    @serv = UNIXServer.new(GEOIP_ENDPOINT)
+    # TODO: handle Errno::EADDRINUSE
+    puts "Ready"
+    while true
+      s = @serv.accept
+      begin
+        s.each_line do |ln|
+          fields = ln.split(".").map { |x| x.to_i }
+          
+          if fields.length == 1
+            ipval = fields[0].to_i
+          elsif fields.length == 4
+            ipval = (fields[0] << 24) + (fields[1] << 16) +
+                    (fields[0] << 8) + (fields[0] << 0)
+          else
+            puts "fields len: #{fields.length}"
+            next
+          end
+
+          begin
+            puts get_range(ipval).country
+            s.write("#{get_range(ipval).country}\n")
+          rescue SystemCallError
+            # Errno::EPIPE
+            puts "debug: client disconnected"
+          rescue RuntimeError
+            puts "N/A"
+            s.write("N/A\n")
+          end
+        end
+      ensure
+        s.close
+      end
+    end
+  end
+end
+
+class IPRange
+  attr_reader :from, :to, :code, :country
+
+  def initialize(f, t, code, country)
+    @from = f
+    @to = t
+    @code = code
+    @country = country
+  end
+
+  def hash
+    [@from, @to].hash
+  end
+  
+  def ==(other)
+    @from == other.from and @to == other.to
+  end
+
+  def <=>(other)
+    @from - other.from
+  end
+
+  def dotted(ival)
+    sprintf("%d.%d.%d.%d", (ival & 0xFF000000) >> 24,
+            (ival & 0x00FF0000) >> 16,
+            (ival & 0x0000FF00) >> 8,
+            (ival & 0x000000FF) >> 0)
+  end
+  
+  def to_s
+    "#{dotted(@from)} - #{dotted(@to)} #{@code} (#{@country})"
+  end
+  
+  include Comparable
+end
+
+
+def query(s)
+  fd = UNIXSocket.new(GEOIP_ENDPOINT)
+
+  fd.write("#{s}\n")
+  return fd.readline()
+rescue SystemCallError => e
+  debug("#{e}")
+  nil
+ensure
+  fd.close unless fd.nil?
+end
+
+if ARGV[0] == "server" || ARGV[0] == "start"
+  puts "starting server, please wait for a while..."
+  server = Server.new
+  server.prepare
+
+  if DAEMONIZE
+    if Process.respond_to?(:daemon)
+      Process.daemon(true, true)
+    else
+      begin
+        require 'daemon'
+        Daemon.daemonize
+      rescue
+        error(1, "'daemon' gem not found")
+        exit 1
+      end
+    end
+  end
+  
+  Signal.trap("TERM") { Server.clean; exit 0 }
+  Signal.trap("INT")  { Server.clean; exit 0 }
+  
+  open(PIDFILE, "w") { |fd|
+    fd.write("#{Process.pid}\n")
+  }
+  
+  server.start
+  exit 0
+elsif ARGV[0] == 'stop'
+  Server.stop
+  exit 0
+end
+
+#puts $PROGRAM_NAME
+
+#binding.pry
+
+# if query("").nil?
+#   $stderr.write("error: server not found\n")
+#   exit 1
+# end
+
+#binding.pry
+
+puts query(ARGV[0]) if ARGV.length > 0
+#binding.pry
+exit 0
+
+__END__
