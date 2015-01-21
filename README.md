@@ -26,7 +26,7 @@ Run `geoip stop` if you want to stop the server.
 Update & Build
 --------------
 
-Downloads CSV database(`GeoIPCountryCSV.zip`) from [maxmind](http://dev.maxmind.com/geoip/legacy/geolite/), and unzip it, then rename the database as `data`.   Finally, just do `make`.
+Downloads CSV database(`GeoIPCountryCSV.zip`) from [MaxMind](http://dev.maxmind.com/geoip/legacy/geolite/), and unzip it, then rename the database as `data`.   Finally, just do `make`.
 
 
 Misc
