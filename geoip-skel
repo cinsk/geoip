@@ -5,6 +5,7 @@ require 'csv'
 require 'zlib'
 require 'socket'
 require 'fileutils'
+require 'optparse'
 
 geoinfo = []
 
@@ -12,10 +13,10 @@ geoinfo = []
 
 PROGRAM_NAME=File.basename($PROGRAM_NAME)
 GEOIP_ENDPOINT="/tmp/geoip"
-PIDFILE="/tmp/geoip.pid"
+$PIDFILE="/tmp/geoip.pid"
 
-DEBUG=(ENV["DEBUG"].to_i != 0)
-DAEMONIZE=true
+$DEBUG=(ENV["DEBUG"].to_i != 0)
+$DAEMONIZE=true
 
 def error(code, msg)
   $stderr.write("#{PROGRAM_NAME}: #{msg}\n")
@@ -23,7 +24,7 @@ def error(code, msg)
 end
 
 def debug(msg)
-  $stderr.write("#{PROGRAM_NAME}: debug: #{msg}\n") if DEBUG
+  $stderr.write("#{PROGRAM_NAME}: debug: #{msg}\n") if $DEBUG
 end
 
 class Server
@@ -57,26 +58,33 @@ class Server
   end
 
   def self.stop
-    open(PIDFILE, "r") { |fd|
+    open($PIDFILE, "r") { |fd|
       ln = fd.readline
+      debug "reading #{$PIDFILE}, send SIGTERM to #{ln}"
       Process.kill("TERM", ln.to_i)
     }
   rescue SystemCallError
     error(0, "sometime went wrong, you'll need to clean manually")
-    error(1, "by removing #{PIDFILE} and #{GEOIP_ENDPOINT}")
+    error(1, "by removing #{$PIDFILE} and #{GEOIP_ENDPOINT}")
   end
 
   def self.clean
+    debug "removing the socket, #{GEOIP_ENDPOINT}"
     FileUtils::rm_f GEOIP_ENDPOINT
-    # TODO: better to delete PIDFILE when PIDFILE's content is the
+    # TODO: better to delete $PIDFILE when $PIDFILE's content is the
     # same as the current pid?
-    FileUtils::rm_f PIDFILE
+    debug "removing the pidfile, #{$PIDFILE}"
+    FileUtils::rm_f $PIDFILE
   end
   
   def start
     prepare if @data.length == 0
     
-    FileUtils::rm_f GEOIP_ENDPOINT
+    begin
+      FileUtils::rm_f GEOIP_ENDPOINT, :verbose => false
+    rescue SystemCallError
+    end
+    
     @serv = UNIXServer.new(GEOIP_ENDPOINT)
     # TODO: handle Errno::EADDRINUSE
     puts "Ready"
@@ -97,8 +105,9 @@ class Server
           end
 
           begin
-            puts get_range(ipval).country
-            s.write("#{get_range(ipval).country}\n")
+            answer = get_range(ipval)
+            debug "req[#{ipval_s(ipval)}] => #{answer.country}"
+            s.write("#{answer.country}\n")
           rescue SystemCallError
             # Errno::EPIPE
             puts "debug: client disconnected"
@@ -151,6 +160,13 @@ class IPRange
 end
 
 
+def ipval_s(ipval)
+  "%d.%d.%d.%d" % [(ipval & 0xFF000000) >> 24,
+                   (ipval & 0xFF0000) >> 16,
+                   (ipval & 0xFF00) >> 8,
+                   (ipval & 0xFF)]
+end
+
 def query(s)
   fd = UNIXSocket.new(GEOIP_ENDPOINT)
 
@@ -163,12 +179,42 @@ ensure
   fd.close unless fd.nil?
 end
 
+def help_and_exit
+  puts <<EOF
+Show geo-location information for given IP address
+Usage: #{PROGRAM_NAME} [OPTION...] start|stop|ADDRESS
+
+  -P, --pidfile=FILE  Use FILE to save the server PID
+  -F, --foreground    when starting the server, run it as foreground process
+
+      --help          display this help and exit
+      --version       output version information and exit
+
+EOF
+  exit 0
+end
+
+$OPTIONS = {}
+begin
+  OptionParser.new { |opts|
+    opts.banner = "Usage #{PROGRAM_NAME} [options]"
+
+    opts.on("-P", "--pidfile") { |arg| $PIDFILE = arg }
+    opts.on("-F", "--foreground")  { $DAEMONIZE = false}
+    opts.on("--debug") { $DEBUG = true }
+    opts.on("--help") { help_and_exit }
+  }.parse!
+rescue OptionParser::InvalidOption => e
+  error(1, "#{e.message}")
+end
+
+
 if ARGV[0] == "server" || ARGV[0] == "start"
   puts "starting server, please wait for a while..."
   server = Server.new
   server.prepare
 
-  if DAEMONIZE
+  if $DAEMONIZE
     if Process.respond_to?(:daemon)
       Process.daemon(true, true)
     else
@@ -185,7 +231,8 @@ if ARGV[0] == "server" || ARGV[0] == "start"
   Signal.trap("TERM") { Server.clean; exit 0 }
   Signal.trap("INT")  { Server.clean; exit 0 }
   
-  open(PIDFILE, "w") { |fd|
+  open($PIDFILE, "w") { |fd|
+    debug "writig current pid(#{Process.pid}) to {$PIDFILE}"
     fd.write("#{Process.pid}\n")
   }
   
